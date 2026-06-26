@@ -5,7 +5,17 @@ import threading
 import json
 import gzip
 import base64
-import webview
+import socket
+import webbrowser
+import queue
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+try:
+    import webview
+    _WEBVIEW_AVAILABLE = True
+except ImportError:
+    webview = None
+    _WEBVIEW_AVAILABLE = False
 # coding: utf-8
 # PMDV Standalone Offline Markdown Viewer
 # units: s, ms
@@ -523,6 +533,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <script id="lib-katex-js"></script>
 
     <script>
+        window._serverPort = $SERVER_PORT;
         // JS Console and Unhandled Exception Logging Bridge
         function logToPython(type, msg, extra = "") {
             if (window.pywebview && window.pywebview.api && window.pywebview.api.log_js_message) {
@@ -564,9 +575,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         // Asynchronously load heavy assets through pywebview API to bypass NavigateToString limit
         async function loadAssetsAndInit() {
             try {
-                if (window.pywebview && window.pywebview.api) {
+                if (window._serverPort) {
+                    // HTTP server mode (no Qt/WebEngine required)
+                    const base = `http://localhost:${window._serverPort}`;
                     setSyncStatus('syncing', 'Loading modules...');
-                    
+                    const [markedCode, markdownItCode, prismCode, katexCode, mermaidCode] = await Promise.all([
+                        fetch(`${base}/api/assets/marked_js`).then(r => r.text()),
+                        fetch(`${base}/api/assets/markdown_it_js`).then(r => r.text()),
+                        fetch(`${base}/api/assets/prism_js`).then(r => r.text()),
+                        fetch(`${base}/api/assets/katex_js`).then(r => r.text()),
+                        fetch(`${base}/api/assets/mermaid_js`).then(r => r.text()),
+                    ]);
+                    injectScript('marked-run', markedCode);
+                    injectScript('markdown-it-run', markdownItCode);
+                    injectScript('prism-run', prismCode);
+                    injectScript('katex-run', katexCode);
+                    injectScript('mermaid-run', mermaidCode);
+                    setSyncStatus('success', 'Modules loaded');
+                    const data = await fetch(`${base}/api/content`).then(r => r.json());
+                    window.updateFromServer(data);
+                    const sse = new EventSource(`${base}/api/events`);
+                    sse.onmessage = (e) => { window.updateFromServer(JSON.parse(e.data)); };
+                    sse.onerror = () => { setSyncStatus('error', 'Reload stream lost'); };
+                } else if (window.pywebview && window.pywebview.api) {
+                    setSyncStatus('syncing', 'Loading modules...');
+
                     const markedCode = await window.pywebview.api.get_asset("marked_js");
                     injectScript('marked-run', markedCode);
 
@@ -583,7 +616,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     injectScript('mermaid-run', mermaidCode);
 
                     setSyncStatus('success', 'Modules loaded');
-                    
+
                     // Fetch initial content
                     const data = await window.pywebview.api.get_server_content();
                     window.updateFromServer(data);
@@ -854,7 +887,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             btnResetServer.style.display = 'none';
             fileInput.value = '';
             setSyncStatus('syncing', 'Updating...');
-            if (window.pywebview && window.pywebview.api) {
+            if (window._serverPort) {
+                fetch(`http://localhost:${window._serverPort}/api/content`)
+                    .then(r => r.json())
+                    .then(data => window.updateFromServer(data))
+                    .catch(() => setSyncStatus('error', 'Server Error'));
+            } else if (window.pywebview && window.pywebview.api) {
                 window.pywebview.api.get_server_content().then(data => {
                     window.updateFromServer(data);
                 }).catch(err => {
@@ -878,7 +916,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         });
 
         // Handle initialization
-        if (window.pywebview) {
+        if (window._serverPort) {
+            loadAssetsAndInit();
+        } else if (window.pywebview) {
             loadAssetsAndInit();
         } else {
             window.addEventListener('pywebviewready', () => {
@@ -894,6 +934,108 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>
 """
+
+
+class SseManager:
+    """Broadcasts file-change events to all connected SSE clients."""
+    def __init__(self):
+        self._queues = []
+        self._lock = threading.Lock()
+
+    def subscribe(self):
+        q = queue.Queue()
+        with self._lock:
+            self._queues.append(q)
+        return q
+
+    def unsubscribe(self, q):
+        with self._lock:
+            try:
+                self._queues.remove(q)
+            except ValueError:
+                pass
+
+    def publish(self, data):
+        payload = json.dumps(data)
+        with self._lock:
+            for q in list(self._queues):
+                q.put(payload)
+
+
+class BrowserHandler(BaseHTTPRequestHandler):
+    def __init__(self, api, html, sse_manager, *args, **kwargs):
+        self.api = api
+        self.html = html
+        self.sse_manager = sse_manager
+        super().__init__(*args, **kwargs)
+
+    def log_message(self, fmt, *args):
+        pass  # suppress access logs
+
+    def _send_cors(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+
+    def do_GET(self):
+        path = self.path.split('?')[0]
+        if path == '/':
+            body = self.html.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self._send_cors()
+            self.end_headers()
+            self.wfile.write(body)
+        elif path.startswith('/api/assets/'):
+            name = path[len('/api/assets/'):]
+            try:
+                body = get_asset(name).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/javascript; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self._send_cors()
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                self.send_error(404)
+        elif path == '/api/content':
+            data = self.api.get_server_content()
+            body = json.dumps(data).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self._send_cors()
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == '/api/events':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Connection', 'keep-alive')
+            self._send_cors()
+            self.end_headers()
+            q = self.sse_manager.subscribe()
+            try:
+                while True:
+                    try:
+                        payload = q.get(timeout=15)
+                        self.wfile.write(f'data: {payload}\n\n'.encode('utf-8'))
+                        self.wfile.flush()
+                    except queue.Empty:
+                        # keepalive comment
+                        self.wfile.write(b': keepalive\n\n')
+                        self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                self.sse_manager.unsubscribe(q)
+        else:
+            self.send_error(404)
+
+
+def _free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
 
 
 class ViewerApi:
@@ -930,12 +1072,12 @@ class ViewerApi:
             "content": content
         }
 
-def watch_loop(window, api):
+def watch_loop(window, api, sse_manager=None):
     filepath = api.markdown_file_path
     last_mtime = 0
     if os.path.exists(filepath):
         last_mtime = os.path.getmtime(filepath)
-        
+
     while True:
         time.sleep(0.5)
         if not os.path.exists(filepath):
@@ -945,8 +1087,11 @@ def watch_loop(window, api):
             if current_mtime != last_mtime:
                 last_mtime = current_mtime
                 data = api.get_server_content()
-                payload = json.dumps(data)
-                window.evaluate_js(f"window.updateFromServer({payload})")
+                if sse_manager is not None:
+                    sse_manager.publish(data)
+                elif window is not None:
+                    payload = json.dumps(data)
+                    window.evaluate_js(f"window.updateFromServer({payload})")
         except Exception:
             pass
 
@@ -1001,26 +1146,55 @@ Welcome to your offline Markdown viewer!
         target = sys.argv[1]
 
     api = ViewerApi(target)
-    
+
     # Resolve and load icon asset
     icon_path = get_resource_path("icon.png")
     icon_base64 = get_icon_base64(icon_path)
-    
+
     html_content = HTML_TEMPLATE
     html_content = html_content.replace("$BRAND_ICON_BASE64", icon_base64)
     html_content = html_content.replace("$GITHUB_CSS", get_asset("github_css"))
     html_content = html_content.replace("$PRISM_CSS", get_asset("prism_css"))
     html_content = html_content.replace("$KATEX_CSS", get_asset("katex_css"))
-    
-    title = "PMDV - Portable Markdown Viewer"
-    window = webview.create_window(title, html=html_content, js_api=api, width=1200, height=800, text_select=True)
-    
-    def on_window_ready():
-        # Start file watch thread
-        watcher_thread = threading.Thread(target=watch_loop, args=(window, api), daemon=True)
+
+    use_browser = '--browser' in sys.argv or not _WEBVIEW_AVAILABLE
+
+    if use_browser:
+        port = _free_port()
+        sse_manager = SseManager()
+        html_for_browser = html_content.replace("$SERVER_PORT", str(port))
+
+        import functools
+        handler = functools.partial(BrowserHandler, api, html_for_browser, sse_manager)
+        server = HTTPServer(('127.0.0.1', port), handler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+
+        watcher_thread = threading.Thread(
+            target=watch_loop, args=(None, api, sse_manager), daemon=True
+        )
         watcher_thread.start()
 
-    webview.start(on_window_ready, debug=False)
+        url = f'http://localhost:{port}/'
+        sys.stderr.write(f'[PMDV] Browser mode: {url}\n')
+        sys.stderr.flush()
+        webbrowser.open(url)
+
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            server.shutdown()
+    else:
+        html_content = html_content.replace("$SERVER_PORT", "0")
+        title = "PMDV - Portable Markdown Viewer"
+        window = webview.create_window(title, html=html_content, js_api=api, width=1200, height=800, text_select=True)
+
+        def on_window_ready():
+            watcher_thread = threading.Thread(target=watch_loop, args=(window, api), daemon=True)
+            watcher_thread.start()
+
+        webview.start(on_window_ready, debug=False)
 
 if __name__ == '__main__':
     main()
