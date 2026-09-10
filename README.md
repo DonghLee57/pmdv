@@ -52,7 +52,23 @@ $$\text{WindowReady} \xrightarrow{\Delta t \ge 300\text{ms}} \text{IPC EvaluateJ
 
 ## 3. Operational Harness
 
-### Option A: Local Run (Python Environment)
+### Option A: Install from PyPI
+
+```bash
+pip install pmdv              # browser mode only, zero dependencies
+pip install "pmdv[gui]"       # adds pywebview for the native window
+pmdv notes.md
+pmdv --version
+```
+
+The base install pulls **no** dependencies: PMDV renders entirely from bundled
+offline assets and serves them over a local loopback port. The `gui` extra adds
+`pywebview` for a native window — on Linux that also needs a system webview
+runtime, see [5. GUI Troubleshooting Manual (Linux)](#5-gui-troubleshooting-manual-linux).
+
+---
+
+### Option B: Local Run (Python Environment)
 1. **Initialize Virtual Environment**:
    ```bash
    python -m venv .venv
@@ -91,7 +107,7 @@ eval $(python3 pmdv/pmdv/viewer.py --init)
 
 ---
 
-### Option B: Standalone Binary Compilation (Portable Mode)
+### Option C: Standalone Binary Compilation (Portable Mode)
 If Python is not present on target offline host machines, compile to a native executable beforehand:
 
 1. **Assemble Embedded Assets**:

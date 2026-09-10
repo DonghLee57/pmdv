@@ -11,6 +11,11 @@ import queue
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 try:
+    from pmdv import __version__ as _VERSION
+except ImportError:  # running viewer.py directly, or from a frozen bundle
+    _VERSION = "1.1.0"
+
+try:
     import webview
     _WEBVIEW_AVAILABLE = True
 except ImportError:
@@ -1175,6 +1180,10 @@ def _run_browser_mode(api, html_content):
         server.shutdown()
 
 def main():
+    if '--version' in sys.argv or '-V' in sys.argv:
+        print(f"pmdv {_VERSION}")
+        sys.exit(0)
+
     if len(sys.argv) >= 2 and sys.argv[1] == '--init':
         python_path = sys.executable
         script_path = os.path.abspath(__file__)
