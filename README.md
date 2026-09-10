@@ -110,10 +110,13 @@ eval $(python3 pmdv/pmdv/viewer.py --init)
 ### Option C: Standalone Binary Compilation (Portable Mode)
 If Python is not present on target offline host machines, compile to a native executable beforehand:
 
-1. **Assemble Embedded Assets**:
+1. **Assemble Embedded Assets** (optional; the repo already ships them):
    ```bash
-   python downloader.py
+   python downloader.py            # refresh the ASSETS dict inside pmdv/viewer.py
+   python downloader.py --check    # verify the embedded assets, no network
    ```
+   `downloader.py` rewrites **only** the `ASSETS = { ... }` block and leaves
+   every other line of `viewer.py` untouched.
 2. **Compile with PyInstaller**:
    ```bash
    python build.py
@@ -158,7 +161,7 @@ graph TD
 ├── pyproject.toml       # PEP 621 metadata, hatchling backend
 ├── requirements.txt     # Build-time tooling (PyInstaller, Pillow)
 ├── build.py             # PyInstaller packaging automation script
-├── downloader.py        # Assets assembler and bundler script
+├── downloader.py        # Fetches CDN assets into viewer.py's ASSETS block
 ├── README.md            # Technical User Manual
 └── LICENSE
 ```
