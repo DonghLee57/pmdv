@@ -68,6 +68,21 @@ $$\text{WindowReady} \xrightarrow{\Delta t \ge 300\text{ms}} \text{IPC EvaluateJ
    python pmdv/pmdv/viewer.py <path-to-markdown-file>
    ```
 
+#### Rendering Modes (Native WebView vs Browser)
+
+PMDV prefers a native window (pywebview) and falls back to your default browser
+whenever no window can be opened — missing backend, headless session, or a
+backend that fails at startup. The reason is always printed to stderr with a
+`[PMDV]` prefix.
+
+On Linux `pip install pywebview` alone is **not** enough: pywebview only wraps a
+native webview runtime, which must come from the system (WebKitGTK via PyGObject,
+or QtWebEngine via PyQt/PySide). Force a mode with `--browser` / `--webview`, or
+pin a backend with `PMDV_GUI=gtk|qt`.
+
+See [5. GUI Troubleshooting Manual (Linux)](#5-gui-troubleshooting-manual-linux)
+for installation commands, symptom-by-symptom fixes, and verification steps.
+
 #### Shell Alias Auto-Setup (Linux/macOS)
 Register `pmdv` as a global command in your terminal session:
 ```bash
@@ -126,4 +141,133 @@ graph TD
 │   └── setup.py         # Setuptools distribution spec
 ├── build.py             # Compiler packaging automation script
 └── downloader.py        # Assets assembler and bundler script
+```
+
+---
+
+## 5. GUI Troubleshooting Manual (Linux)
+
+### 5.1 How PMDV picks a rendering mode
+
+`pywebview` is **not** a renderer — it is a thin wrapper around an OS-native
+webview. Windows ships WebView2 and macOS ships WKWebView, so the native window
+"just works" there. Linux ships neither, so PMDV probes for a backend at startup
+and falls back rather than crashing:
+
+```mermaid
+graph TD
+    START["main()"] --> BR{"--browser passed?"}
+    BR -->|yes| BROWSER["Browser mode<br/>127.0.0.1 HTTP + SSE"]
+    BR -->|no| PW{"pywebview importable?"}
+    PW -->|no| BROWSER
+    PW -->|yes| DISP{"DISPLAY or<br/>WAYLAND_DISPLAY set?"}
+    DISP -->|no| BROWSER
+    DISP -->|yes| DET{"Backend detected?<br/>gi+WebKit2 / Qt+QtWebEngine"}
+    DET -->|none| BROWSER
+    DET -->|found| NATIVE["webview.start(gui=backend)"]
+    NATIVE -->|raises| BROWSER
+```
+
+Every fallback prints its reason to stderr with a `[PMDV]` prefix, so the first
+diagnostic step is always to read the startup lines.
+
+### 5.2 Flags and environment variables
+
+| Control | Effect |
+| --- | --- |
+| `--browser` | Force browser mode; skip the native window entirely. |
+| `--webview` | Force the native window; skip the capability probe (useful for seeing the raw backend error). |
+| `PMDV_GUI=gtk` | Pin the GTK/WebKitGTK backend. |
+| `PMDV_GUI=qt` | Pin the Qt/QtWebEngine backend. |
+| `PYWEBVIEW_GUI=…` | Same as `PMDV_GUI`; honored for pywebview compatibility. |
+
+### 5.3 Symptom → cause → fix
+
+**`[PMDV] No native webview backend found …`**
+Neither WebKitGTK nor QtWebEngine is importable. Install one — see 5.4.
+
+**`[PMDV] No DISPLAY/WAYLAND_DISPLAY found …`**
+Headless session: plain SSH, a container, or WSL without an X server. Either use
+browser mode (recommended on servers), or forward a display with `ssh -X` /
+`ssh -Y`, or install WSLg.
+
+**`[PMDV] Native webview failed to start (…)`**
+A backend was detected but died during window creation. Read the exception name
+in the message and match it below.
+
+**`ModuleNotFoundError: No module named 'qtpy'` — or a `qtpy` error naming no binding**
+`qtpy` is only an abstraction layer; it resolves nothing by itself. pywebview
+fell through to the Qt backend because GTK was unavailable. Install a real
+binding *and* QtWebEngine (`pip install PyQt5 PyQtWebEngine`), or install the
+GTK stack so the GTK backend wins.
+
+**`ModuleNotFoundError: No module named 'gi'` while the distro packages are installed**
+The venv cannot see system site-packages. `python3-gi` is a distro package and
+is never visible to an isolated venv. Recreate it:
+
+```bash
+python3 -m venv --system-site-packages .venv
+```
+
+**`ValueError: Namespace WebKit2 not available`**
+PyGObject is present but the WebKitGTK typelib is not. Install
+`gir1.2-webkit2-4.1` (Debian/Ubuntu) or `webkit2gtk4.1` (Fedora).
+
+**`qt.qpa.plugin: Could not load the Qt platform plugin "xcb"`**
+Qt's platform plugin is missing its X11 libraries. On Debian/Ubuntu:
+
+```bash
+sudo apt install libxcb-cursor0 libxcb-xinerama0 libxkbcommon-x11-0
+```
+
+Run with `QT_DEBUG_PLUGINS=1` to see which specific library failed to load.
+
+**Window opens but stays blank/white**
+Usually GPU/sandbox related on remote or virtualized displays. Try
+`WEBKIT_DISABLE_COMPOSITING_MODE=1` (GTK) or
+`QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu --no-sandbox"` (Qt). If the content
+renders in browser mode, the Markdown pipeline is fine and the problem is the
+backend.
+
+### 5.4 Installing a backend
+
+```bash
+# Debian / Ubuntu — GTK backend (recommended: smallest, best integrated)
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1
+python3 -m venv --system-site-packages .venv
+
+# Fedora / RHEL
+sudo dnf install python3-gobject gtk3 webkit2gtk4.1
+
+# Qt backend — pure pip, no root needed, but a large download
+pip install PyQt5 PyQtWebEngine     # or: pip install PySide6
+```
+
+### 5.5 Verifying the environment
+
+```bash
+python -c "from pmdv import viewer as v; print('display:', v._has_display()); print('backend:', repr(v._detect_gui_backend()))"
+```
+
+- `backend: 'gtk'` or `'qt'` — the native window should open.
+- `backend: None` — no backend; PMDV will use browser mode.
+- `display: False` — headless; PMDV will use browser mode.
+
+Individual stacks can be checked directly:
+
+```bash
+python -c "import gi; gi.require_version('WebKit2','4.1'); print('GTK ok')"
+python -c "import PyQt5.QtWebEngineWidgets; print('Qt ok')"
+```
+
+### 5.6 When to just use browser mode
+
+On headless servers, in containers, and over SSH, browser mode is the intended
+path — not a degraded one. It serves the same bundled offline page from
+`127.0.0.1` on an ephemeral port and keeps live reload through Server-Sent
+Events, so the only functional difference is which window frame the content sits
+in. No dependency beyond the standard library is required.
+
+```bash
+python pmdv/pmdv/viewer.py notes.md --browser
 ```

@@ -1095,6 +1095,85 @@ def watch_loop(window, api, sse_manager=None):
         except Exception:
             pass
 
+def _has_display():
+    """True when a GUI session is actually reachable (X11/Wayland on Linux)."""
+    if sys.platform.startswith('win') or sys.platform == 'darwin':
+        return True
+    return bool(os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'))
+
+def _detect_gui_backend():
+    """Return a pywebview gui backend name usable here, or None if there is none.
+
+    pywebview needs a *native* webview runtime. On Linux that is either
+    WebKitGTK through PyGObject ('gtk') or QtWebEngine through PyQt/PySide
+    ('qt'); neither is installed by `pip install pywebview`. Probing up front
+    lets us fall back to browser mode instead of dying inside webview.start().
+    """
+    if not _WEBVIEW_AVAILABLE:
+        return None
+    if not sys.platform.startswith('linux'):
+        return ''  # let pywebview pick (EdgeChromium on Windows, Cocoa on macOS)
+
+    forced = os.environ.get('PMDV_GUI') or os.environ.get('PYWEBVIEW_GUI')
+    if forced:
+        return forced
+
+    import importlib.util as _ilu
+
+    def _found(*mods):
+        try:
+            return all(_ilu.find_spec(m) is not None for m in mods)
+        except (ImportError, ValueError, AttributeError):
+            return False
+
+    if _found('gi'):
+        try:
+            import gi
+            for name, ver in (('WebKit2', '4.1'), ('WebKit2', '4.0'), ('WebKit', '6.0')):
+                try:
+                    gi.require_version(name, ver)
+                    return 'gtk'
+                except ValueError:
+                    continue
+        except Exception:
+            pass
+
+    for qt_pkg in ('PyQt6', 'PySide6', 'PyQt5'):
+        if _found(qt_pkg, qt_pkg + '.QtWebEngineWidgets'):
+            return 'qt'
+
+    return None
+
+def _run_browser_mode(api, html_content):
+    port = _free_port()
+    sse_manager = SseManager()
+    html_for_browser = html_content.replace("$SERVER_PORT", str(port))
+
+    import functools
+    handler = functools.partial(BrowserHandler, api, html_for_browser, sse_manager)
+    server = HTTPServer(('127.0.0.1', port), handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    watcher_thread = threading.Thread(
+        target=watch_loop, args=(None, api, sse_manager), daemon=True
+    )
+    watcher_thread.start()
+
+    url = f'http://localhost:{port}/'
+    sys.stderr.write(f'[PMDV] Browser mode: {url}\n')
+    sys.stderr.flush()
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        server.shutdown()
+
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] == '--init':
         python_path = sys.executable
@@ -1157,44 +1236,50 @@ Welcome to your offline Markdown viewer!
     html_content = html_content.replace("$PRISM_CSS", get_asset("prism_css"))
     html_content = html_content.replace("$KATEX_CSS", get_asset("katex_css"))
 
-    use_browser = '--browser' in sys.argv or not _WEBVIEW_AVAILABLE
+    force_webview = '--webview' in sys.argv
+    use_browser = '--browser' in sys.argv
+    gui_backend = None
+
+    if not use_browser:
+        gui_backend = _detect_gui_backend()
+        if force_webview:
+            pass
+        elif not _WEBVIEW_AVAILABLE:
+            sys.stderr.write('[PMDV] pywebview is not installed; using browser mode.\n')
+            use_browser = True
+        elif not _has_display():
+            sys.stderr.write('[PMDV] No DISPLAY/WAYLAND_DISPLAY found; using browser mode.\n')
+            use_browser = True
+        elif gui_backend is None:
+            sys.stderr.write(
+                '[PMDV] No native webview backend found (WebKitGTK via PyGObject, '
+                'or QtWebEngine via PyQt/PySide); using browser mode.\n'
+                '[PMDV] Install one of them, or pass --browser to skip this check.\n'
+            )
+            use_browser = True
 
     if use_browser:
-        port = _free_port()
-        sse_manager = SseManager()
-        html_for_browser = html_content.replace("$SERVER_PORT", str(port))
+        _run_browser_mode(api, html_content)
+        return
 
-        import functools
-        handler = functools.partial(BrowserHandler, api, html_for_browser, sse_manager)
-        server = HTTPServer(('127.0.0.1', port), handler)
-        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
-
-        watcher_thread = threading.Thread(
-            target=watch_loop, args=(None, api, sse_manager), daemon=True
+    webview_html = html_content.replace("$SERVER_PORT", "0")
+    title = "PMDV - Portable Markdown Viewer"
+    try:
+        window = webview.create_window(
+            title, html=webview_html, js_api=api,
+            width=1200, height=800, text_select=True,
         )
-        watcher_thread.start()
-
-        url = f'http://localhost:{port}/'
-        sys.stderr.write(f'[PMDV] Browser mode: {url}\n')
-        sys.stderr.flush()
-        webbrowser.open(url)
-
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            server.shutdown()
-    else:
-        html_content = html_content.replace("$SERVER_PORT", "0")
-        title = "PMDV - Portable Markdown Viewer"
-        window = webview.create_window(title, html=html_content, js_api=api, width=1200, height=800, text_select=True)
 
         def on_window_ready():
             watcher_thread = threading.Thread(target=watch_loop, args=(window, api), daemon=True)
             watcher_thread.start()
 
-        webview.start(on_window_ready, debug=False)
+        start_kwargs = {'gui': gui_backend} if gui_backend else {}
+        webview.start(on_window_ready, debug=False, **start_kwargs)
+    except Exception as e:
+        sys.stderr.write(f'[PMDV] Native webview failed to start ({e.__class__.__name__}: {e}).\n')
+        sys.stderr.write('[PMDV] Falling back to browser mode.\n')
+        _run_browser_mode(api, html_content)
 
 if __name__ == '__main__':
     main()
