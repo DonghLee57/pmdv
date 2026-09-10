@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 try:
     from pmdv import __version__ as _VERSION
 except ImportError:  # running viewer.py directly, or from a frozen bundle
-    _VERSION = "1.1.0"
+    _VERSION = "1.1.1"
 
 try:
     import webview

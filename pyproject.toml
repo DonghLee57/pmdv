@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pmdv"
+dynamic = ["version"]
+description = "Portable Markdown Viewer with Live-Reload and Multi-Engine Swap"
+readme = "README.md"
+requires-python = ">=3.7"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "DonghLee57" }]
+keywords = ["markdown", "viewer", "offline", "live-reload", "webview"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Topic :: Text Processing :: Markup :: Markdown",
+    "Topic :: Utilities",
+]
+
+# Deliberately empty: PMDV renders from bundled offline assets and falls back to
+# a loopback HTTP server, so a plain `pip install pmdv` needs nothing at all.
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["pywebview>=6.0.0"]
+
+[project.urls]
+Homepage = "https://github.com/DonghLee57/pmdv"
+Source = "https://github.com/DonghLee57/pmdv"
+"Issue Tracker" = "https://github.com/DonghLee57/pmdv/issues"
+
+[project.scripts]
+pmdv = "pmdv.viewer:main"
+
+[tool.hatch.version]
+path = "pmdv/__init__.py"
+
+# core-metadata-version is pinned to 2.4 on each target: hatchling defaults to
+# 2.5, which PyPI and current twine releases still reject. It is read per target,
+# so it cannot be hoisted into a shared [tool.hatch.build] section.
+[tool.hatch.build.targets.wheel]
+core-metadata-version = "2.4"
+packages = ["pmdv"]
+# icon.ico is a PyInstaller build-time asset only; icon.png is the runtime brand mark.
+exclude = ["icon.ico"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"pmdv/icon.png" = "pmdv/icon.png"
+
+[tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
+include = [
+    "pmdv/",
+    "README.md",
+    "LICENSE",
+    "build.py",
+    "downloader.py",
+    "requirements.txt",
+]

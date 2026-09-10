@@ -1,0 +1,84 @@
+name: Publish to PyPI
+
+# Tagging a release publishes it. The tag must match __version__ in
+# pmdv/__init__.py -- the verify step below fails the run otherwise, so a
+# mistyped tag never reaches PyPI (where a version can never be re-uploaded).
+#
+# One-time setup on PyPI: Manage project -> Publishing -> add a GitHub trusted
+# publisher with owner "DonghLee57", repository "pmdv", workflow "publish.yml",
+# environment "pypi". No API token is stored anywhere after that.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(python -c 'import re; print(re.search(r"__version__\s*=\s*\"([^\"]+)\"", open("pmdv/__init__.py").read()).group(1))')"
+          echo "tag=$tag_version package=$pkg_version"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::Tag $tag_version does not match __version__ $pkg_version"
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        # `pyproject-build`, not `python -m build`: this repo has its own
+        # build.py (the PyInstaller helper) at the root, and `-m build` would
+        # import that instead of the build backend.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+          pyproject-build --outdir dist .
+          python -m twine check dist/*
+
+      - name: Confirm the brand icon is bundled
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          whl = glob.glob('dist/*.whl')[0]
+          names = zipfile.ZipFile(whl).namelist()
+          if 'pmdv/icon.png' not in names:
+              sys.exit(f'icon.png missing from {whl}: {names}')
+          print(f'ok: {whl} contains pmdv/icon.png')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Trusted publishing: OIDC instead of a stored API token.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pmdv
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

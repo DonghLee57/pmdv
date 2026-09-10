@@ -148,17 +148,46 @@ graph TD
 ### Directory Structure
 ```
 .
-├── pmdv/                # Core package directory
-│   ├── pmdv/
-│   │   ├── __init__.py  # Package initializer
-│   │   └── viewer.py    # Main GUI Application Source
-│   ├── README.md        # Technical User Manual
-│   ├── requirements.txt # Runtime dependencies (pywebview)
-│   └── setup.py         # Setuptools distribution spec
-├── build.py             # Compiler packaging automation script
-└── downloader.py        # Assets assembler and bundler script
+├── .github/workflows/
+│   └── publish.yml      # Tag-triggered PyPI release (trusted publishing)
+├── pmdv/                # Core package (this is what ships on PyPI)
+│   ├── __init__.py      # Package initializer; single source of __version__
+│   ├── viewer.py        # Main application source, with embedded assets
+│   ├── icon.png         # Runtime brand mark, bundled into the wheel
+│   └── icon.ico         # PyInstaller icon; sdist only, excluded from the wheel
+├── pyproject.toml       # PEP 621 metadata, hatchling backend
+├── requirements.txt     # Build-time tooling (PyInstaller, Pillow)
+├── build.py             # PyInstaller packaging automation script
+├── downloader.py        # Assets assembler and bundler script
+├── README.md            # Technical User Manual
+└── LICENSE
 ```
 
+### Release Process
+
+The version lives in exactly one place, `pmdv/__init__.py`; `pyproject.toml`
+reads it through hatchling and `pmdv --version` prints it.
+
+1. Bump `__version__` in `pmdv/__init__.py`.
+2. Commit, then tag and push:
+   ```bash
+   git tag -a v1.1.1 -m "PMDV 1.1.1" && git push origin master v1.1.1
+   ```
+3. `.github/workflows/publish.yml` builds the sdist and wheel, refuses to
+   continue if the tag and `__version__` disagree, checks that `pmdv/icon.png`
+   made it into the wheel, and uploads to PyPI over OIDC.
+
+One-time PyPI setup: **Manage project → Publishing → add a GitHub trusted
+publisher** with owner `DonghLee57`, repository `pmdv`, workflow `publish.yml`,
+environment `pypi`. No API token is stored in the repository.
+
+To build locally instead:
+
+```bash
+pip install build twine
+pyproject-build          # NOT `python -m build`: build.py at the root shadows it
+twine check dist/*
+```
 ---
 
 ## 5. GUI Troubleshooting Manual (Linux)
